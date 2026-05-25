@@ -46,6 +46,15 @@ function detectRuntimeMode() {
   return "self-host";
 }
 
+function getVirtualPathname() {
+  const params = new URLSearchParams(window.location.search);
+  const redirectedPath = params.get("p");
+  if (redirectedPath) {
+    return redirectedPath.startsWith("/") ? redirectedPath : `/${redirectedPath}`;
+  }
+  return window.location.pathname;
+}
+
 function normalizeAndValidatePortfolioData(value) {
   if (!value || typeof value !== "object" || Array.isArray(value)) {
     return { ok: false, message: "Portfolio data must be a JSON object." };
@@ -123,7 +132,9 @@ async function validateRepoAccess(token, fullRepo) {
 }
 
 export default function App() {
-  const isAdminRoute = window.location.pathname.replace(/\/+$/, "") === "/admin";
+  const virtualPathname = getVirtualPathname();
+  const pathSegments = virtualPathname.split("/").filter(Boolean);
+  const isAdminRoute = pathSegments[pathSegments.length - 1] === "admin";
   const runtimeMode = detectRuntimeMode();
   const requiresPat = runtimeMode === "github-pages";
   const autoDetectedRepo = detectRepoFromUrl();
@@ -146,7 +157,7 @@ export default function App() {
       setMessage("");
 
       try {
-        const res = await fetch("/portfolio-data.json");
+        const res = await fetch(`${import.meta.env.BASE_URL}portfolio-data.json`);
         if (!res.ok) throw new Error(`Failed to load portfolio-data.json (${res.status})`);
         let json = await res.json();
         if (!requiresPat) {
