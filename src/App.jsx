@@ -47,6 +47,10 @@ function detectRuntimeMode() {
 }
 
 function getVirtualPathname() {
+  if (window.location.hash.startsWith("#/")) {
+    return window.location.hash.slice(1);
+  }
+
   const params = new URLSearchParams(window.location.search);
   const redirectedPath = params.get("p");
   if (redirectedPath) {
@@ -138,6 +142,10 @@ export default function App() {
   const runtimeMode = detectRuntimeMode();
   const requiresPat = runtimeMode === "github-pages";
   const autoDetectedRepo = detectRepoFromUrl();
+  const canonicalAdminUrl =
+    runtimeMode === "github-pages"
+      ? `${import.meta.env.BASE_URL}#/admin`
+      : `${window.location.origin}/admin`;
 
   const [tokenInput, setTokenInput] = useState("");
   const [repoInput, setRepoInput] = useState("");
@@ -431,6 +439,11 @@ export default function App() {
         <header>
           <h1 className="text-2xl font-bold md:text-3xl">Admin</h1>
           <p className="text-sm text-slate-400">/admin mode: {runtimeMode}</p>
+          {runtimeMode === "github-pages" && (
+            <p className="text-xs text-slate-500">
+              Canonical admin URL for Pages: <code>{canonicalAdminUrl}</code>
+            </p>
+          )}
         </header>
 
         {message && (
