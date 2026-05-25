@@ -1,0 +1,29 @@
+<!doctype html>
+<html>
+  <head>
+    <meta charset="utf-8" />
+    <title>Redirecting...</title>
+    <script>
+      (function () {
+        var path = window.location.pathname;
+        var base = '/';
+        var repoSegment = path.split('/').filter(Boolean)[0];
+        if (window.location.hostname.endsWith('.github.io') && repoSegment) {
+          base = '/' + repoSegment + '/';
+        }
+
+        var rest = path.startsWith(base) ? path.slice(base.length - 1) : path;
+        var target = base + '?p=' + encodeURIComponent(rest);
+        if (window.location.search) {
+          target += '&q=' + encodeURIComponent(window.location.search.slice(1));
+        }
+        if (window.location.hash) {
+          target += '&h=' + encodeURIComponent(window.location.hash.slice(1));
+        }
+
+        window.location.replace(target);
+      })();
+    </script>
+  </head>
+  <body></body>
+</html>
