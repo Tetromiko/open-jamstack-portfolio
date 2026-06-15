@@ -1,171 +1,136 @@
-import { useEffect, useMemo, useState } from "react";
-
-const STORAGE_TOKEN_KEY = "github_pat";
-const STORAGE_REPO_KEY = "github_repo";
-const LEGACY_TOKEN_KEY = "portfolio_github_pat";
-const LEGACY_REPO_KEY = "portfolio_github_repo";
-const LOCAL_DATA_KEY = "portfolio_local_data";
-const FILE_PATH = "public/portfolio-data.json";
-const HELP_LINK = "https://docs.github.com/en/authentication/keeping-your-account-and-data-secure/creating-a-personal-access-token";
-const SCHEMA_VERSION = 1;
-
-function prettyJson(value) {
-  return JSON.stringify(value, null, 2);
-}
-
-function toBase64Utf8(value) {
-  return btoa(unescape(encodeURIComponent(value)));
-}
-
-function parseRepo(fullRepo) {
-  const [owner, repo] = fullRepo.trim().split("/");
-  if (!owner || !repo) return null;
-  return { owner, repo };
-}
-
-function detectRepoFromUrl() {
-  const host = window.location.hostname.toLowerCase();
-  if (!host.endsWith(".github.io")) return "";
-
-  const owner = host.replace(".github.io", "");
-  const segments = window.location.pathname.split("/").filter(Boolean);
-  const firstSegment = segments[0] || "";
-  const isRootAdmin = firstSegment === "admin" || firstSegment === "";
-  const repo = isRootAdmin ? `${owner}.github.io` : firstSegment;
-  return `${owner}/${repo}`;
-}
-
-function detectRuntimeMode() {
-  const host = window.location.hostname.toLowerCase();
-  if (host === "localhost" || host === "127.0.0.1" || host === "::1") {
-    return "self-host";
-  }
-  if (host.endsWith(".github.io")) {
-    return "github-pages";
-  }
-  return "self-host";
-}
-
-function normalizeAndValidatePortfolioData(value) {
-  if (!value || typeof value !== "object" || Array.isArray(value)) {
-    return { ok: false, message: "Portfolio data must be a JSON object." };
-  }
-
-  const next = { ...value };
-  if (next.schemaVersion === undefined) {
-    next.schemaVersion = SCHEMA_VERSION;
-  }
-  if (next.schemaVersion !== SCHEMA_VERSION) {
-    return { ok: false, message: `Unsupported schemaVersion. Expected ${SCHEMA_VERSION}.` };
-  }
-
-  if (!next.profile || typeof next.profile !== "object") {
-    return { ok: false, message: "Missing profile object." };
-  }
-  if (!next.contacts || typeof next.contacts !== "object") {
-    return { ok: false, message: "Missing contacts object." };
-  }
-
-  const mustBeString = [
-    ["profile.name", next.profile.name],
-    ["profile.title", next.profile.title],
-    ["profile.location", next.profile.location],
-    ["profile.summary", next.profile.summary],
-    ["contacts.email", next.contacts.email],
-    ["contacts.linkedin", next.contacts.linkedin],
-  ];
-
-  for (const [field, fieldValue] of mustBeString) {
-    if (typeof fieldValue !== "string" || fieldValue.trim() === "") {
-      return { ok: false, message: `Field ${field} must be a non-empty string.` };
-    }
-  }
-
-  return { ok: true, data: next };
-}
-
-async function validateRepoAccess(token, fullRepo) {
-  const parsed = parseRepo(fullRepo);
-  if (!parsed) {
-    return { ok: false, message: "Repo format must be owner/repo." };
-  }
-
-  const repoUrl = `https://api.github.com/repos/${parsed.owner}/${parsed.repo}`;
-  const res = await fetch(repoUrl, {
-    headers: {
-      Authorization: `Bearer ${token}`,
-      Accept: "application/vnd.github+json",
-    },
-  });
-
-  if (!res.ok) {
-    if (res.status === 401) {
-      return { ok: false, message: "Invalid token (401)." };
-    }
-    if (res.status === 403) {
-      return { ok: false, message: "Token exists but does not have access (403)." };
-    }
-    if (res.status === 404) {
-      return { ok: false, message: "Repository not found or no access (404)." };
-    }
-
-    return { ok: false, message: `GitHub check failed (${res.status}).` };
-  }
-
-  const repoData = await res.json();
-  const canWrite = Boolean(repoData?.permissions?.push || repoData?.permissions?.admin || repoData?.permissions?.maintain);
-
-  if (!canWrite) {
-    return { ok: false, message: "Token is valid, but no write permission for this repository." };
-  }
-
-  return { ok: true };
-}
+import { useCallback, useEffect, useMemo, useRef, useState } from "react";
+import {
+  DATA_FILE_PUBLIC_PATH,
+  DEFAULT_BRANCH,
+  DRAFT_STORAGE_KEY,
+  LEGACY_REPO_KEY,
+  LEGACY_TOKEN_KEY,
+  STORAGE_BRANCH_KEY,
+  STORAGE_REPO_KEY,
+  STORAGE_TOKEN_KEY,
+} from "./constants";
+import { AdminDashboard } from "./components/admin/AdminDashboard";
+import { AdminLogin } from "./components/admin/AdminLogin";
+import { PublicProfile } from "./components/public/PublicProfile";
+import { Alert } from "./components/ui/Alert";
+import { createBlock } from "./features/registry";
+import { revokePendingAsset } from "./services/mediaStaging";
+import { createPortfolioChangeSet } from "./services/storage/changeSet";
+import { validateRepoAccess } from "./services/storage/githubProvider";
+import { createStorageProvider } from "./services/storage/storageProvider";
+import { shortSha } from "./utils/format";
+import { collectLocalMediaPaths, publicUploadPathToRepoPath, repoUploadPathToPublicPath } from "./utils/mediaReferences";
+import {
+  detectRepoFromUrl,
+  detectRuntimeMode,
+  getAdminUrl,
+  getConfiguredBranch,
+  getVirtualPathname,
+} from "./utils/routing";
+import {
+  addBlockToHomePage,
+  moveBlock,
+  normalizePortfolioData,
+  removeBlock,
+  updateBlockState,
+  validatePortfolioData,
+} from "./utils/validation";
 
 export default function App() {
-  const isAdminRoute = window.location.pathname.replace(/\/+$/, "") === "/admin";
+  const virtualPathname = getVirtualPathname();
+  const isAdminRoute = virtualPathname.endsWith("/admin");
   const runtimeMode = detectRuntimeMode();
-  const requiresPat = runtimeMode === "github-pages";
   const autoDetectedRepo = detectRepoFromUrl();
+  const defaultBranch = getConfiguredBranch() || DEFAULT_BRANCH;
+  const canonicalAdminUrl = getAdminUrl(runtimeMode);
 
-  const [tokenInput, setTokenInput] = useState("");
-  const [repoInput, setRepoInput] = useState("");
-  const [savedToken, setSavedToken] = useState("");
-  const [savedRepo, setSavedRepo] = useState("");
+  const [auth, setAuth] = useState({
+    token: "",
+    repo: autoDetectedRepo,
+    branch: defaultBranch,
+  });
   const [data, setData] = useState(null);
-  const [jsonDraft, setJsonDraft] = useState("");
+  const [pendingAssets, setPendingAssets] = useState([]);
+  const [deletedAssetRepoPaths, setDeletedAssetRepoPaths] = useState([]);
+  const [lastPublish, setLastPublish] = useState(null);
   const [status, setStatus] = useState("booting");
   const [message, setMessage] = useState("");
+  const mediaCleanupKeyRef = useRef("");
 
-  const isAuthenticated = Boolean(savedToken && savedRepo);
-  const canSave = useMemo(() => (requiresPat ? isAuthenticated : true) && status !== "saving", [isAuthenticated, requiresPat, status]);
+  const storageProvider = useMemo(
+    () =>
+      createStorageProvider({
+        runtimeMode,
+        token: auth.token,
+        repo: auth.repo,
+        branch: auth.branch,
+      }),
+    [auth.branch, auth.repo, auth.token, runtimeMode],
+  );
+  const requiresPat = storageProvider.requiresAuth;
+  const isAuthenticated = Boolean(auth.token && auth.repo && auth.branch);
+  const authReady = requiresPat ? isAuthenticated : true;
+  const showDashboard = Boolean(data) && authReady;
+  const canSave = Boolean(data) && authReady && status !== "saving" && status !== "loading";
+
+  const findUnusedUploadRepoPaths = useCallback(async () => {
+    if (!data || !storageProvider.listUploadFiles) return [];
+
+    const uploadRepoPaths = await storageProvider.listUploadFiles();
+    const usedPublicPaths = new Set(collectLocalMediaPaths(data));
+    const pendingRepoPaths = new Set(pendingAssets.map((asset) => asset.repoPath));
+
+    return uploadRepoPaths
+      .filter((repoPath) => !pendingRepoPaths.has(repoPath))
+      .filter((repoPath) => {
+        const publicPath = repoUploadPathToPublicPath(repoPath);
+        return publicPath && !usedPublicPaths.has(publicPath);
+      });
+  }, [data, pendingAssets, storageProvider]);
+
+  const persistAuth = useCallback((nextAuth) => {
+    localStorage.setItem(STORAGE_TOKEN_KEY, nextAuth.token);
+    localStorage.setItem(STORAGE_REPO_KEY, nextAuth.repo);
+    localStorage.setItem(STORAGE_BRANCH_KEY, nextAuth.branch);
+    localStorage.removeItem(LEGACY_TOKEN_KEY);
+    localStorage.removeItem(LEGACY_REPO_KEY);
+    setAuth(nextAuth);
+  }, []);
+
+  const handleLogout = useCallback((reload = true) => {
+    localStorage.removeItem(STORAGE_TOKEN_KEY);
+    localStorage.removeItem(STORAGE_REPO_KEY);
+    localStorage.removeItem(STORAGE_BRANCH_KEY);
+    setAuth({ token: "", repo: autoDetectedRepo, branch: defaultBranch });
+    setStatus("idle");
+    setMessage("Сесію очищено.");
+    if (reload) window.location.reload();
+  }, [autoDetectedRepo, defaultBranch]);
 
   useEffect(() => {
+    let cancelled = false;
+
     async function bootstrap() {
       setStatus("loading");
       setMessage("");
 
       try {
-        const res = await fetch("/portfolio-data.json");
-        if (!res.ok) throw new Error(`Failed to load portfolio-data.json (${res.status})`);
-        let json = await res.json();
-        if (!requiresPat) {
-          const localJsonRaw = localStorage.getItem(LOCAL_DATA_KEY);
-          if (localJsonRaw) {
-            try {
-              json = JSON.parse(localJsonRaw);
-            } catch {
-              localStorage.removeItem(LOCAL_DATA_KEY);
-            }
-          }
+        const cacheBuster = runtimeMode === "local-dev" ? `?t=${Date.now()}` : "";
+        const response = await fetch(`${import.meta.env.BASE_URL}${DATA_FILE_PUBLIC_PATH}${cacheBuster}`);
+        if (!response.ok) {
+          throw new Error(`Не вдалося завантажити ${DATA_FILE_PUBLIC_PATH} (${response.status}).`);
         }
-        const validated = normalizeAndValidatePortfolioData(json);
-        if (!validated.ok) throw new Error(validated.message);
-        setData(validated.data);
-        setJsonDraft(prettyJson(validated.data));
+
+        const json = await response.json();
+        const validation = validatePortfolioData(json);
+        if (!validation.ok) throw new Error(validation.message);
+        if (cancelled) return;
+
+        setData(validation.data);
       } catch (error) {
+        if (cancelled) return;
         setStatus("error");
-        setMessage(error.message || "Failed to load public data.");
+        setMessage(error.message || "Помилка завантаження публічних даних.");
         return;
       }
 
@@ -175,339 +140,331 @@ export default function App() {
       }
 
       if (!requiresPat) {
-        setSavedToken("self-host-bypass");
-        setSavedRepo("local/dev");
+        setAuth({ token: "local-dev", repo: "local/dev", branch: defaultBranch });
         setStatus("success");
-        setMessage("Self-host mode: admin access is open without PAT.");
+        setMessage("Local dev mode: редактор відкритий, save піде у файлову систему.");
         return;
       }
 
       const storedToken = localStorage.getItem(STORAGE_TOKEN_KEY) || localStorage.getItem(LEGACY_TOKEN_KEY) || "";
-      const persistedRepo = localStorage.getItem(STORAGE_REPO_KEY) || localStorage.getItem(LEGACY_REPO_KEY) || "";
-      const storedRepo = persistedRepo || autoDetectedRepo;
+      const storedRepo = localStorage.getItem(STORAGE_REPO_KEY) || localStorage.getItem(LEGACY_REPO_KEY) || autoDetectedRepo;
+      const storedBranch = localStorage.getItem(STORAGE_BRANCH_KEY) || defaultBranch;
 
-      setTokenInput(storedToken);
-      setRepoInput(storedRepo);
-
+      setAuth({ token: "", repo: storedRepo, branch: storedBranch });
       if (!storedToken || !storedRepo) {
         setStatus("idle");
         return;
       }
 
       setStatus("auth-checking");
-      const result = await validateRepoAccess(storedToken, storedRepo);
+      setMessage("Перевірка доступу до репозиторію...");
+
+      const result = await validateRepoAccess(storedToken, storedRepo, storedBranch);
+      if (cancelled) return;
 
       if (!result.ok) {
-        localStorage.removeItem(STORAGE_TOKEN_KEY);
-        localStorage.removeItem(STORAGE_REPO_KEY);
-        localStorage.removeItem(LEGACY_TOKEN_KEY);
-        localStorage.removeItem(LEGACY_REPO_KEY);
-
-        setSavedToken("");
-        setSavedRepo("");
+        handleLogout(false);
         setStatus("error");
-        setMessage(`${result.message} Please login again.`);
+        setMessage(`${result.message} Авторизуйтесь ще раз.`);
         return;
       }
 
-      localStorage.setItem(STORAGE_TOKEN_KEY, storedToken);
-      localStorage.setItem(STORAGE_REPO_KEY, storedRepo);
-      setSavedToken(storedToken);
-      setSavedRepo(storedRepo);
+      persistAuth({ token: storedToken, repo: storedRepo, branch: result.branch || storedBranch });
       setStatus("success");
-      setMessage("Session restored. Admin dashboard unlocked.");
+      setMessage("Сесію відновлено. Редактор готовий.");
     }
 
     bootstrap();
-  }, [autoDetectedRepo, isAdminRoute, requiresPat]);
+
+    return () => {
+      cancelled = true;
+    };
+  }, [autoDetectedRepo, defaultBranch, handleLogout, isAdminRoute, persistAuth, requiresPat, runtimeMode]);
 
   useEffect(() => {
-    if (requiresPat) return;
-    function onStorage(event) {
-      if (event.key !== LOCAL_DATA_KEY || !event.newValue) return;
+    if (!isAdminRoute || !showDashboard || !data || !storageProvider.listUploadFiles) return;
+
+    const cleanupKey = `${storageProvider.mode}:${auth.repo}:${auth.branch}:${collectLocalMediaPaths(data).join("|")}`;
+    if (mediaCleanupKeyRef.current === cleanupKey) return;
+    mediaCleanupKeyRef.current = cleanupKey;
+
+    let cancelled = false;
+
+    async function cleanupUnusedMediaQuietly() {
       try {
-        const next = JSON.parse(event.newValue);
-        setData(next);
-        if (!isAdminRoute) return;
-        setJsonDraft(prettyJson(next));
-      } catch {
-        // ignore malformed local data
+        const unusedRepoPaths = await findUnusedUploadRepoPaths();
+        if (cancelled || unusedRepoPaths.length === 0) return;
+
+        const validation = validatePortfolioData(data);
+        if (!validation.ok) return;
+
+        const changeSet = createPortfolioChangeSet(validation.data, [], unusedRepoPaths);
+        await storageProvider.publish(changeSet);
+      } catch (error) {
+        console.warn("Unused media cleanup skipped.", error);
       }
     }
-    window.addEventListener("storage", onStorage);
-    return () => window.removeEventListener("storage", onStorage);
-  }, [isAdminRoute, requiresPat]);
 
-  async function handleLogin(event) {
-    event.preventDefault();
+    cleanupUnusedMediaQuietly();
 
-    const token = tokenInput.trim();
-    const repo = repoInput.trim();
+    return () => {
+      cancelled = true;
+    };
+  }, [auth.branch, auth.repo, data, findUnusedUploadRepoPaths, isAdminRoute, showDashboard, storageProvider]);
 
-    if (!token || !repo) {
-      setStatus("error");
-      setMessage("Paste PAT and repo in owner/repo format.");
-      return;
-    }
+  async function handleLogin({ token, repo, branch }) {
+    if (!token.trim() || !repo.trim() || !branch.trim()) return;
 
     setStatus("auth-checking");
-    setMessage("Checking token and repository access...");
+    setMessage("Перевірка GitHub доступу...");
 
+    const result = await validateRepoAccess(token.trim(), repo.trim(), branch.trim());
+    if (!result.ok) {
+      setStatus("error");
+      setMessage(result.message);
+      return;
+    }
+
+    persistAuth({
+      token: token.trim(),
+      repo: repo.trim(),
+      branch: result.branch || branch.trim(),
+    });
+    setStatus("success");
+    setMessage("GitHub storage підключено.");
+  }
+
+  function handleBlockCommit(blockId, nextState, stagedAssets = []) {
+    const nextData = updateBlockState(data, blockId, nextState);
+    const beforeMediaPaths = collectLocalMediaPaths(data);
+    const afterMediaPaths = new Set(collectLocalMediaPaths(nextData));
+    const stagedPublicPaths = new Set(stagedAssets.map((asset) => asset.publicPath));
+    const pendingMediaPaths = new Set(pendingAssets.map((asset) => asset.publicPath));
+    const removedMediaPaths = beforeMediaPaths.filter((path) => !afterMediaPaths.has(path));
+    const removedPublishedRepoPaths = beforeMediaPaths
+      .filter((path) => !afterMediaPaths.has(path))
+      .filter((path) => !stagedPublicPaths.has(path))
+      .filter((path) => !pendingMediaPaths.has(path))
+      .map(publicUploadPathToRepoPath)
+      .filter(Boolean);
+
+    if (removedPublishedRepoPaths.length) {
+      setDeletedAssetRepoPaths((current) => [...new Set([...current, ...removedPublishedRepoPaths])]);
+    }
+
+    if (stagedAssets.length) {
+      const usedPublicPaths = new Set(collectLocalMediaPaths(nextData));
+      setPendingAssets((current) => [
+        ...current.filter((asset) => {
+          const shouldKeep = !removedMediaPaths.includes(asset.publicPath);
+          if (!shouldKeep) revokePendingAsset(asset);
+          return shouldKeep;
+        }),
+        ...stagedAssets.filter((asset) => usedPublicPaths.has(asset.publicPath)),
+      ]);
+    } else if (removedMediaPaths.some((path) => pendingMediaPaths.has(path))) {
+      setPendingAssets((current) => current.filter((asset) => {
+        const shouldKeep = !removedMediaPaths.includes(asset.publicPath);
+        if (!shouldKeep) revokePendingAsset(asset);
+        return shouldKeep;
+      }));
+    }
+
+    setData(nextData);
+    setLastPublish(null);
+    setStatus("idle");
+    setMessage("Зміни блока застосовано.");
+  }
+
+  function handleAddBlock(type, parentId = "", targetIndex = null) {
     try {
-      const result = await validateRepoAccess(token, repo);
-      if (!result.ok) {
-        setStatus("error");
-        setMessage("Invalid token or missing write access. " + result.message);
-        return;
-      }
-
-      localStorage.setItem(STORAGE_TOKEN_KEY, token);
-      localStorage.setItem(STORAGE_REPO_KEY, repo);
-      localStorage.removeItem(LEGACY_TOKEN_KEY);
-      localStorage.removeItem(LEGACY_REPO_KEY);
-
-      setSavedToken(token);
-      setSavedRepo(repo);
-      setStatus("success");
-      setMessage("Connected. Admin dashboard is ready.");
+      setData((current) => addBlockToHomePage(current, createBlock(type), parentId, targetIndex));
+      setLastPublish(null);
+      setStatus("idle");
+      setMessage("Блок додано до документа.");
     } catch (error) {
       setStatus("error");
-      setMessage(error.message || "Token validation failed.");
+      setMessage(error.message || "Не вдалося додати блок.");
     }
   }
 
-  function handleLogout() {
-    localStorage.removeItem(STORAGE_TOKEN_KEY);
-    localStorage.removeItem(STORAGE_REPO_KEY);
-    localStorage.removeItem(LEGACY_TOKEN_KEY);
-    localStorage.removeItem(LEGACY_REPO_KEY);
-
-    setSavedToken("");
-    setSavedRepo("");
-    setTokenInput("");
-    setRepoInput("");
+  function handleMoveBlock(blockId, parentId = "", targetIndex = null) {
+    setData((current) => moveBlock(current, blockId, parentId, targetIndex));
+    setLastPublish(null);
     setStatus("idle");
-    setMessage("Logged out. Local session cleared.");
-
-    window.location.reload();
+    setMessage("Порядок блоків оновлено.");
   }
 
-  async function handleSaveToGitHub() {
-    if (!canSave) return;
+  function handleThemeChange(nextTheme) {
+    setData((current) => normalizePortfolioData({
+      ...current,
+      site: {
+        ...current.site,
+        theme: nextTheme,
+      },
+    }));
+    setLastPublish(null);
+    setStatus("idle");
+    setMessage("Тему оновлено.");
+  }
 
-    let parsed;
-    try {
-      parsed = JSON.parse(jsonDraft);
-    } catch {
+  function handleRemoveBlock(blockId) {
+    const beforeMediaPaths = collectLocalMediaPaths(data);
+    const nextData = removeBlock(data, blockId);
+    const afterMediaPaths = new Set(collectLocalMediaPaths(nextData));
+    const orphanedMediaPaths = beforeMediaPaths.filter((path) => !afterMediaPaths.has(path));
+    const pendingMediaPaths = new Set(pendingAssets.map((asset) => asset.publicPath));
+    const orphanedPublishedRepoPaths = orphanedMediaPaths
+      .filter((path) => !pendingMediaPaths.has(path))
+      .map(publicUploadPathToRepoPath)
+      .filter(Boolean);
+
+    if (orphanedMediaPaths.some((path) => pendingMediaPaths.has(path))) {
+      setPendingAssets((current) => current.filter((asset) => {
+        const shouldKeep = !orphanedMediaPaths.includes(asset.publicPath);
+        if (!shouldKeep) revokePendingAsset(asset);
+        return shouldKeep;
+      }));
+    }
+
+    if (orphanedPublishedRepoPaths.length) {
+      setDeletedAssetRepoPaths((current) => [...new Set([...current, ...orphanedPublishedRepoPaths])]);
+    }
+
+    setData(nextData);
+    setLastPublish(null);
+  }
+
+  function handleRemovePendingAsset(assetId) {
+    const asset = pendingAssets.find((item) => item.id === assetId);
+    if (!asset) return;
+
+    revokePendingAsset(asset);
+    setPendingAssets((current) => current.filter((item) => item.id !== assetId));
+    setData((current) => normalizePortfolioData(replaceAssetReference(current, asset.publicPath, "")));
+  }
+
+  async function handleSave() {
+    if (!canSave || !data) return;
+
+    const validation = validatePortfolioData(data);
+    if (!validation.ok) {
       setStatus("error");
-      setMessage("JSON is invalid. Fix syntax before saving.");
+      setMessage(validation.message);
       return;
     }
-    const validated = normalizeAndValidatePortfolioData(parsed);
-    if (!validated.ok) {
-      setStatus("error");
-      setMessage(validated.message);
-      return;
-    }
-    parsed = validated.data;
 
-    if (!requiresPat) {
-      const nextJsonString = prettyJson(parsed) + "\n";
-      setData(parsed);
-      setJsonDraft(nextJsonString);
-      localStorage.setItem(LOCAL_DATA_KEY, JSON.stringify(parsed));
-      setStatus("success");
-      setMessage("Self-host mode: data updated locally (no GitHub write).");
-      return;
-    }
-
-    const parsedRepo = parseRepo(savedRepo);
-    if (!parsedRepo) {
+    if (storageProvider.requiresAuth && !isAuthenticated) {
       setStatus("error");
-      setMessage("Repo must be in owner/repo format.");
+      setMessage("Потрібно підключити GitHub PAT перед публікацією.");
       return;
     }
 
     setStatus("saving");
-    setMessage("Saving changes to GitHub...");
+    setMessage("Формування атомарного change set...");
 
     try {
-      const apiUrl = `https://api.github.com/repos/${parsedRepo.owner}/${parsedRepo.repo}/contents/${FILE_PATH}`;
-
-      const getRes = await fetch(apiUrl, {
-        headers: {
-          Authorization: `Bearer ${savedToken}`,
-          Accept: "application/vnd.github+json",
-        },
-      });
-
-      if (!getRes.ok) {
-        const err = await getRes.json().catch(() => ({}));
-        throw new Error(`SHA fetch failed (${getRes.status}): ${err.message || "Unknown error"}`);
-      }
-
-      const getData = await getRes.json();
-      const sha = getData.sha;
-      if (!sha) throw new Error("SHA not found in GitHub response.");
-
-      const nextJsonString = prettyJson(parsed) + "\n";
-      const contentBase64 = toBase64Utf8(nextJsonString);
-
-      const putRes = await fetch(apiUrl, {
-        method: "PUT",
-        headers: {
-          Authorization: `Bearer ${savedToken}`,
-          Accept: "application/vnd.github+json",
-          "Content-Type": "application/json",
-        },
-        body: JSON.stringify({
-          message: "chore: update portfolio-data.json from admin panel",
-          content: contentBase64,
-          sha,
+      localStorage.setItem(
+        DRAFT_STORAGE_KEY,
+        JSON.stringify({
+          savedAt: new Date().toISOString(),
+          data: validation.data,
         }),
+      );
+
+      const stillUnusedDeletedAssetRepoPaths = deletedAssetRepoPaths.filter((repoPath) => {
+        const publicPath = repoPath.replace(/^public/, "");
+        return !collectLocalMediaPaths(validation.data).includes(publicPath);
       });
+      const changeSet = createPortfolioChangeSet(validation.data, pendingAssets, stillUnusedDeletedAssetRepoPaths);
+      const result = await storageProvider.publish(changeSet);
 
-      if (!putRes.ok) {
-        const err = await putRes.json().catch(() => ({}));
-        throw new Error(`PUT failed (${putRes.status}): ${err.message || "Unknown error"}`);
-      }
-
-      setData(parsed);
-      setJsonDraft(nextJsonString);
+      pendingAssets.forEach(revokePendingAsset);
+      setPendingAssets([]);
+      setDeletedAssetRepoPaths([]);
+      setData(validation.data);
+      setLastPublish(result);
       setStatus("success");
-      setMessage("Saved to GitHub successfully.");
+      setMessage(
+        result.commitSha
+          ? `Зміни опубліковано одним commit: ${shortSha(result.commitSha)}.`
+          : "Зміни опубліковано.",
+      );
     } catch (error) {
       setStatus("error");
-      setMessage(error.message || "Save failed");
+      setMessage(error.message || "Публікація не вдалася.");
     }
   }
 
   if (!isAdminRoute) {
+    return <PublicProfile status={status} message={message} data={data} />;
+  }
+
+  if (showDashboard) {
     return (
-      <main className="min-h-screen bg-slate-950 p-6 text-slate-100 md:p-10">
-        <div className="mx-auto max-w-4xl space-y-6">
-          <header>
-            <h1 className="text-2xl font-bold md:text-3xl">Open Jamstack Portfolio</h1>
-            <p className="text-sm text-slate-400">Public profile view</p>
-          </header>
-
-          {status === "loading" && <p className="text-slate-300">Loading portfolio data...</p>}
-
-          {message && status === "error" && (
-            <p className="rounded-lg bg-red-500/20 p-3 text-sm text-red-200">{message}</p>
-          )}
-
-          {data && (
-            <section className="space-y-4 rounded-2xl border border-slate-800 bg-slate-900/60 p-6">
-              <h2 className="text-xl font-semibold">Profile</h2>
-              <p className="text-slate-300"><span className="font-medium">Name:</span> {data.profile?.name}</p>
-              <p className="text-slate-300"><span className="font-medium">Title:</span> {data.profile?.title}</p>
-              <p className="text-slate-300"><span className="font-medium">Location:</span> {data.profile?.location}</p>
-              <p className="text-slate-300">{data.profile?.summary}</p>
-              <a className="text-cyan-300 underline" href={data.contacts?.linkedin}>LinkedIn</a>
-            </section>
-          )}
-        </div>
+      <main data-theme={data.site.theme} className="site-page min-h-screen">
+        <AdminDashboard
+          data={data}
+          onBlockCommit={handleBlockCommit}
+          onAddBlock={handleAddBlock}
+          onMoveBlock={handleMoveBlock}
+          onRemoveBlock={handleRemoveBlock}
+          onRemovePendingAsset={handleRemovePendingAsset}
+          pendingAssets={pendingAssets}
+          theme={data.site.theme}
+          onThemeChange={handleThemeChange}
+          onSave={handleSave}
+          onLogout={handleLogout}
+          savedRepo={auth.repo}
+          savedBranch={auth.branch}
+          status={status}
+          message={message}
+          requiresPat={requiresPat}
+          canSave={canSave}
+          lastPublish={lastPublish}
+        />
       </main>
     );
   }
 
-  const showDashboard = requiresPat ? isAuthenticated : true;
-
   return (
-    <main className="min-h-screen bg-slate-950 p-6 text-slate-100 md:p-10">
-      <div className="mx-auto max-w-3xl space-y-6">
-        <header>
-          <h1 className="text-2xl font-bold md:text-3xl">Admin</h1>
-          <p className="text-sm text-slate-400">/admin mode: {runtimeMode}</p>
+    <main className="site-page min-h-screen px-4 py-6 md:px-8 md:py-8">
+      <div className="mx-auto max-w-5xl space-y-6">
+        <header className="space-y-1">
+          <h1 className="text-2xl font-bold tracking-normal md:text-3xl">Portfolio Admin</h1>
+          <p className="text-sm text-stone-600">
+            Mode: <span className="font-mono">{runtimeMode}</span>
+            <span className="mx-2 text-stone-300">/</span>
+            URL: <code>{canonicalAdminUrl}</code>
+          </p>
         </header>
 
-        {message && (
-          <p className={`rounded-lg p-3 text-sm ${status === "error" ? "bg-red-500/20 text-red-200" : status === "success" ? "bg-emerald-500/20 text-emerald-200" : "bg-slate-800 text-slate-200"}`}>
-            {message}
-          </p>
-        )}
+        <Alert status={status} message={message} />
 
-        {!showDashboard && (
-          <section className="space-y-4 rounded-2xl border border-slate-800 bg-slate-900/60 p-6">
-            <h2 className="text-lg font-semibold">Connect Repository</h2>
-
-            <form onSubmit={handleLogin} className="space-y-3">
-              <input
-                className="w-full rounded-lg border border-slate-700 bg-slate-950 p-3"
-                type="password"
-                placeholder="GitHub Personal Access Token"
-                value={tokenInput}
-                onChange={(e) => setTokenInput(e.target.value)}
-                required
-              />
-              <input
-                className="w-full rounded-lg border border-slate-700 bg-slate-950 p-3"
-                type="text"
-                placeholder="owner/repo"
-                value={repoInput}
-                onChange={(e) => setRepoInput(e.target.value)}
-                required
-              />
-              {autoDetectedRepo && (
-                <p className="text-xs text-slate-400">
-                  Auto-detected repository: <code>{autoDetectedRepo}</code>
-                </p>
-              )}
-
-              <button
-                type="submit"
-                disabled={status === "auth-checking"}
-                className="rounded-lg bg-cyan-500 px-4 py-2 font-semibold text-slate-950 disabled:opacity-60"
-              >
-                {status === "auth-checking" ? "Checking..." : "Connect Repository"}
-              </button>
-            </form>
-
-            <p className="rounded-lg border border-slate-800 bg-slate-950/60 p-3 text-sm text-slate-300">
-              For login, use GitHub PAT with write access (`repo` scope for classic PAT). Quick guide: {" "}
-              <a className="text-cyan-300 underline" href={HELP_LINK} target="_blank" rel="noreferrer">
-                create token in 30 seconds
-              </a>
-              .
-            </p>
+        {!data ? (
+          <section className="rounded-lg border border-stone-200 bg-white p-5 text-sm text-stone-600 shadow-sm">
+            Завантаження даних портфоліо...
           </section>
-        )}
-
-        {showDashboard && (
-          <section className="space-y-4 rounded-2xl border border-slate-800 bg-slate-900/60 p-6">
-            <div className="flex flex-wrap items-center justify-between gap-3">
-              <h2 className="text-lg font-semibold">Dashboard</h2>
-              <button onClick={handleLogout} className="rounded-lg bg-slate-700 px-4 py-2 text-sm font-medium">
-                Logout
-              </button>
-            </div>
-
-            <p className="text-sm text-slate-300">Connected repository: <code>{savedRepo}</code></p>
-            {!requiresPat && (
-              <p className="rounded-lg border border-amber-500/30 bg-amber-500/10 p-3 text-sm text-amber-200">
-                Self-host mode active. PAT auth is bypassed for local development only.
-              </p>
-            )}
-
-            <textarea
-              className="h-80 w-full rounded-lg border border-slate-700 bg-slate-950 p-3 font-mono text-sm"
-              value={jsonDraft}
-              onChange={(e) => setJsonDraft(e.target.value)}
-            />
-
-            <button
-              onClick={handleSaveToGitHub}
-              disabled={!canSave}
-              className="rounded-lg bg-emerald-500 px-4 py-2 font-semibold text-slate-950 disabled:opacity-50"
-            >
-              {status === "saving" ? "Saving..." : "Save to GitHub"}
-            </button>
-
-            <p className="text-xs text-slate-400">Target file: <code>{FILE_PATH}</code></p>
-          </section>
+        ) : (
+          <AdminLogin
+            onLogin={handleLogin}
+            autoRepo={auth.repo}
+            defaultBranch={auth.branch}
+            status={status}
+          />
         )}
       </div>
     </main>
   );
+}
+
+function replaceAssetReference(value, from, to) {
+  if (Array.isArray(value)) return value.map((item) => replaceAssetReference(item, from, to));
+  if (value && typeof value === "object") {
+    return Object.fromEntries(
+      Object.entries(value).map(([key, item]) => [key, replaceAssetReference(item, from, to)]),
+    );
+  }
+
+  return value === from ? to : value;
 }

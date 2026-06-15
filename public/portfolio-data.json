@@ -1,13 +1,91 @@
 {
-  "schemaVersion": 1,
-  "profile": {
-    "name": "Your Name",
-    "title": "Frontend Developer",
-    "location": "Kyiv, Ukraine",
-    "summary": "Building practical web products with React and TypeScript."
+  "schemaVersion": 2,
+  "site": {
+    "title": "Ruslan Titarenko Portfolio",
+    "language": "uk",
+    "theme": "dark"
   },
-  "contacts": {
-    "email": "you@example.com",
-    "linkedin": "https://www.linkedin.com/in/your-profile"
-  }
+  "pages": [
+    {
+      "id": "home",
+      "path": "/",
+      "title": "Home",
+      "blocks": [
+        {
+          "id": "author-info-73eda273-c4b7-4e50-a72c-a88e0167fbcd",
+          "type": "author.info",
+          "version": 1,
+          "state": {
+            "avatar": "/uploads/kotsyk-20260615125424.png",
+            "name": "Vasyl Retrohrad",
+            "title": "3D Artist (Hard Surface)",
+            "location": "Ladyzhyn",
+            "socialDisplay": "tags",
+            "socials": [
+              {
+                "id": "cd43de45-4e2e-43b9-95b1-ccf26beb4556",
+                "icon": "/uploads/totp_logo_transparent_background-20260615125536.png",
+                "name": "emoticon",
+                "url": "https://www.linkedin.com/in/ruslan-titarenko-633729279/"
+              }
+            ]
+          }
+        },
+        {
+          "id": "layout-list-0b5f6bcd-d9fa-476e-9255-0c9f1e199b15",
+          "type": "layout.list",
+          "version": 1,
+          "state": {
+            "orientation": "vertical",
+            "gap": "md",
+            "padding": "md",
+            "maxSize": "md",
+            "scroll": true,
+            "anchorX": "center",
+            "anchorY": "stretch"
+          },
+          "children": [
+            {
+              "id": "media-photoCaption-f5da8c68-41af-4253-b2bc-2156fa8f9244",
+              "type": "media.photoCaption",
+              "version": 1,
+              "state": {
+                "image": {
+                  "src": "/uploads/folderdungeondoor-20260615125650.png",
+                  "alt": "",
+                  "fit": "cover",
+                  "position": "center"
+                },
+                "caption": {
+                  "text": "Asset from Folder Dungeon Game",
+                  "placement": "below",
+                  "fontSize": "md",
+                  "fontStyle": "italic"
+                }
+              }
+            },
+            {
+              "id": "media-photoCaption-72eef11a-f62a-45f3-ad73-8fc05def4534",
+              "type": "media.photoCaption",
+              "version": 1,
+              "state": {
+                "image": {
+                  "src": "/uploads/mush-20260615130432.png",
+                  "alt": "",
+                  "fit": "contain",
+                  "position": "center"
+                },
+                "caption": {
+                  "text": "Mushroom Unit from unreleased rts game MushRoots",
+                  "placement": "below",
+                  "fontSize": "md",
+                  "fontStyle": "normal"
+                }
+              }
+            }
+          ]
+        }
+      ]
+    }
+  ]
 }

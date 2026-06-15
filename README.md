@@ -1,18 +1,23 @@
-# Open Jamstack Portfolio (Dev Factory)
+# Open Jamstack Portfolio
 
-This repository is the development factory for an open-source portfolio editor built with React, Tailwind, GitHub Pages, and GitHub API.
+This repository is a template factory for a static portfolio with a browser-based admin.
 
 ## Branch model
 
-- `dev`: developer environment (experiments, tooling, self-host mode)
-- `main`: clean template output for end users
+- `dev` is the development factory.
+- `main` is the clean template users create repositories from with **Use this template**.
+- `main` is generated from `dev` by `.github/workflows/build-template.yml`.
 
-`main` should be generated from `dev` through CI (`build-template.yml`), not edited manually.
+## Architecture
 
-## Runtime modes
+- Content lives in `public/portfolio-data.json`.
+- Features are block descriptors in `src/features`.
+- The site model treats JSON as a page/block document rendered by a builder.
+- Admin saves through a storage abstraction.
+- Local dev uses Vite middleware and writes to the filesystem.
+- Template runtime uses GitHub REST Git Data API and publishes JSON plus media in one commit.
 
-- `self-host` (`localhost`): `/admin` is open for fast UI development; saves are local-only
-- `github-pages` (`*.github.io`): `/admin` requires PAT + write access and saves to GitHub API
+See `docs/SITE_FUNCTIONALITY.md` for the feature/editor/view contract.
 
 ## Local development
 
@@ -21,30 +26,21 @@ npm install
 npm run dev
 ```
 
+Open `/admin` on localhost. No PAT is required in local dev mode.
+
 ## Template export
 
 ```bash
 npm run template:check
 ```
 
-This command builds the app and generates a clean export in `.template-export/`.
+The export is written to `.template-export/`. During export, dev-only storage middleware is removed and the storage provider is replaced with the GitHub-only provider.
 
-## Data contract (minimum)
+## User setup from template
 
-`public/portfolio-data.json` must include:
-
-```json
-{
-  "schemaVersion": 1,
-  "profile": {
-    "name": "",
-    "title": "",
-    "location": "",
-    "summary": ""
-  },
-  "contacts": {
-    "email": "",
-    "linkedin": ""
-  }
-}
-```
+1. Click **Use this template**.
+2. Create a repository, usually `username.github.io`.
+3. Enable GitHub Pages for the repository.
+4. Open `/admin`.
+5. Enter a fine-grained PAT with `Contents: Read and write`.
+6. Edit and publish.
