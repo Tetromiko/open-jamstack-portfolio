@@ -1,13 +1,37 @@
 {
-  "schemaVersion": 1,
-  "profile": {
-    "name": "Your Name",
-    "title": "Frontend Developer",
-    "location": "Kyiv, Ukraine",
-    "summary": "Building practical web products with React and TypeScript."
+  "schemaVersion": 2,
+  "site": {
+    "title": "Personal Portfolio",
+    "language": "uk",
+    "theme": "light"
   },
-  "contacts": {
-    "email": "you@example.com",
-    "linkedin": "https://www.linkedin.com/in/your-profile"
-  }
+  "pages": [
+    {
+      "id": "home",
+      "path": "/",
+      "title": "Home",
+      "blocks": [
+        {
+          "id": "author-info",
+          "type": "author.info",
+          "version": 1,
+          "state": {
+            "avatar": "",
+            "name": "Your Name",
+            "title": "Your Role",
+            "location": "City, Country",
+            "socialDisplay": "icons-labels",
+            "socials": [
+              {
+                "id": "linkedin",
+                "icon": "in",
+                "name": "LinkedIn",
+                "url": "https://www.linkedin.com/in/your-profile"
+              }
+            ]
+          }
+        }
+      ]
+    }
+  ]
 }
